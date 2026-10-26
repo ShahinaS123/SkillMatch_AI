@@ -16,4 +16,4 @@ SkillMatch AI is a PhD research prototype designed to bridge the gap between aca
 *   **Database & Auth:** Supabase (PostgreSQL)
 *   **Document Processing:** PyTesseract, PyPDF
 
-**Live App:** [Insert your Streamlit URL here]
+**Live App:** https://skillmatch-ai-eqnhwpjpxjjwgjzxejhwhe.streamlit.app/
