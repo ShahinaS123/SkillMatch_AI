@@ -19,16 +19,26 @@ def init_supabase() -> Client:
 
 supabase = init_supabase()
 
-# Initialize session state for authentication
 if "user" not in st.session_state:
     st.session_state.user = None
+
+# Define the levels based on your research architecture
+ROLES = [
+    "Student", 
+    "Teacher / Professor", 
+    "Organization (HR)", 
+    "Industry Level", 
+    "Institutional Level", 
+    "Recruitment Level", 
+    "Researcher"
+]
 
 # ==========================================
 # 2. LOGIN / SIGNUP SCREEN
 # ==========================================
 def show_auth_screen():
     st.title("🔐 Welcome to SkillMatch AI")
-    st.markdown("Please log in or create an account to access your research library.")
+    st.markdown("Please log in or create an account to access your personalized research library.")
     
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
     
@@ -39,17 +49,25 @@ def show_auth_screen():
             try:
                 response = supabase.auth.sign_in_with_password({"email": email, "password": password})
                 st.session_state.user = response.user
-                st.rerun() # Refresh to show the main app
+                st.rerun() 
             except Exception as e:
                 st.error(f"Login failed: {e}")
                 
     with tab2:
         new_email = st.text_input("Email", key="signup_email")
         new_password = st.text_input("Password", type="password", key="signup_pass")
+        # New: Role Selection Dropdown
+        user_role = st.selectbox("Select your user profile:", ROLES, key="signup_role")
+        
         if st.button("Create Account"):
             try:
-                response = supabase.auth.sign_up({"email": new_email, "password": new_password})
-                st.success("Account created! You can now log in.")
+                # Save the role in Supabase user metadata
+                response = supabase.auth.sign_up({
+                    "email": new_email, 
+                    "password": new_password,
+                    "options": {"data": {"role": user_role}}
+                })
+                st.success(f"Account created as {user_role}! You can now log in.")
             except Exception as e:
                 st.error(f"Signup failed: {e}")
 
@@ -57,44 +75,58 @@ def show_auth_screen():
 # 3. MAIN APP LOGIC
 # ==========================================
 def show_main_app():
-    # Sidebar with Logout
+    # Get user role from metadata (default to 'Student' if missing)
+    user_role = st.session_state.user.user_metadata.get("role", "Student")
+
+    # --- SIDEBAR: Navigation & Library ---
     with st.sidebar:
-        st.write(f"👤 Logged in as: **{st.session_state.user.email}**")
-        if st.button("Log Out"):
+        st.header("Navigation")
+        st.write(f"👤 **{st.session_state.user.email}**")
+        st.info(f"Role: {user_role}")
+        
+        # NEW: The Library is now in the Sidebar
+        menu = st.radio("Go to:", ["🔬 New Analysis", "📚 My Library"])
+        
+        st.divider()
+        if st.button("Log Out", type="primary"):
             supabase.auth.sign_out()
             st.session_state.user = None
             st.rerun()
 
-    # Create two main tabs: One for Analysis, One for Library
-    app_tab, library_tab = st.tabs(["🔬 New Analysis", "📚 My Library"])
-
-    # --- TAB 1: NEW ANALYSIS ---
-    with app_tab:
-        st.title("🎓 Industry Matching Module")
-        st.markdown("Aligning Cultivated Talent Competencies with Industry Requirements.")
+    # --- MAIN AREA: NEW ANALYSIS ---
+    if menu == "🔬 New Analysis":
+        # Dynamic titles based on role
+        if user_role == "Student":
+            st.title("🎓 Student Career Alignment")
+            st.markdown("Upload your CV and a target job description to find your skill gaps.")
+        elif user_role in ["Organization (HR)", "Recruitment Level"]:
+            st.title("🏢 Enterprise Talent Matching")
+            st.markdown("Match candidate CVs against industry requirements.")
+        else:
+            st.title(f"📊 {user_role} Dashboard")
+            st.markdown("Align Cultivated Talent Competencies with Industry Requirements.")
 
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader("🏢 Industry Requirements")
-            jd_tab1, jd_tab2 = st.tabs(["📝 Paste Text", "📄 Upload File/Image"])
+            st.subheader("🏢 Industry Requirements (JD)")
+            jd_tab1, jd_tab2 = st.tabs(["📝 Paste Text", "📄 Upload File"])
             with jd_tab1:
                 jd_text = st.text_area("Paste Job Description here:", height=250)
             with jd_tab2:
                 jd_file = st.file_uploader("Upload JD (PDF/Image)", type=["pdf", "png", "jpg", "jpeg"])
 
         with col2:
-            st.subheader("🎓 Candidate Profile")
+            st.subheader("🎓 Candidate Profile (CV/Syllabus)")
             cv_tab1, cv_tab2 = st.tabs(["📝 Paste Text", "📄 Upload File"])
             with cv_tab1:
-                cv_text = st.text_area("Paste Resume/Syllabus here:", height=250)
+                cv_text = st.text_area("Paste Resume or Syllabus here:", height=250)
             with cv_tab2:
                 cv_file = st.file_uploader("Upload Resume (PDF/TXT)", type=["pdf", "txt"])
 
         if st.button("Run Matching Algorithm", type="primary", use_container_width=True):
             final_jd, final_cv = "", ""
             
-            # Process files
             if jd_file: final_jd = extract_text_from_file(jd_file)
             elif jd_text: final_jd = jd_text
             
@@ -114,7 +146,7 @@ def show_main_app():
                     try:
                         data_to_save = {
                             "user_id": str(st.session_state.user.id),
-                            "jd_text": final_jd[:500], # Save snippet to save space
+                            "jd_text": final_jd[:500], 
                             "cv_text": final_cv[:500],
                             "match_score": result['matching_score'],
                             "matched_skills": ", ".join(result['gap_analysis']['matched']),
@@ -125,7 +157,7 @@ def show_main_app():
                     except Exception as e:
                         st.error(f"Database Error: {e}")
 
-                    # Display Results
+                    # --- DISPLAY RESULTS ---
                     st.divider()
                     st.metric("Overall Matching Score", f"{result['matching_score']}%")
                     
@@ -139,17 +171,27 @@ def show_main_app():
                     
                     st.divider()
                     st.subheader("📊 AI Career & Market Strategy")
-                    st.markdown(result["evidence"][0])
+                    report_text = result["evidence"][0]
+                    st.markdown(report_text)
+                    
+                    # NEW: Download Button for the Assessment Report
+                    st.download_button(
+                        label="📥 Download Full Assessment Report",
+                        data=report_text,
+                        file_name=f"SkillMatch_Report_{user_role}.md",
+                        mime="text/markdown",
+                        use_container_width=True
+                    )
             else:
                 st.warning("Please provide both JD and CV.")
 
-    # --- TAB 2: MY LIBRARY ---
-    with library_tab:
+    # --- MAIN AREA: MY LIBRARY ---
+    elif menu == "📚 My Library":
         st.title("📚 My Saved Analyses")
-        st.markdown("View your past matching results.")
+        st.markdown(f"Viewing historical data for: **{user_role}**")
         
-        # Fetch data from Supabase
         try:
+            # Because of RLS in Supabase, this only fetches the logged-in user's data
             response = supabase.table("analysis_history").select("*").order("created_at", desc=True).execute()
             history = response.data
             
@@ -158,7 +200,7 @@ def show_main_app():
             else:
                 for item in history:
                     with st.expander(f"Score: {item['match_score']}% | Date: {item['created_at'][:10]}"):
-                        st.write(f"**Job Description Snippet:** {item['jd_text']}...")
+                        st.write(f"**JD Snippet:** {item['jd_text']}...")
                         st.write(f"**Matched:** {item['matched_skills']}")
                         st.write(f"**Missing:** {item['missing_skills']}")
         except Exception as e:
