@@ -9,3 +9,6 @@ pytesseract
 pillow
 pdf2image
 supabase
+plotly
+fpdf2
+openpyxl
