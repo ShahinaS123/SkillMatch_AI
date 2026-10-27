@@ -11,4 +11,5 @@ pdf2image
 supabase
 plotly
 fpdf2
+matplotlib
 openpyxl
