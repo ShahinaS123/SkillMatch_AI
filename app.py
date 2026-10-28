@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import time
+import zipfile
+import io
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -9,9 +11,12 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
+import pycountry
 
 from graph import create_graph
 from file_processor import extract_text_from_file
+from media_processor import transcribe_media
+from nodes import analyze_media_transcript, generate_cover_letter_node, generate_interview_questions_node
 from pdf_generator import generate_pdf_report
 import db_utils
 
@@ -24,6 +29,90 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 logo_path = os.path.join(current_dir, "logo.png")
 page_icon = logo_path if os.path.exists(logo_path) else "⚙️"
 st.set_page_config(page_title="SkillMatch AI", layout="wide", page_icon=page_icon)
+
+hide_default_nav = """
+<style>
+    [data-testid="stSidebarNav"] { display: none; }
+</style>
+"""
+st.markdown(hide_default_nav, unsafe_allow_html=True)
+
+# ==========================================
+# LANGUAGE DICTIONARY
+# ==========================================
+LANGUAGES = {
+    "🇬🇧 English": {
+        "title": "SkillMatch AI", "nav_analysis": "🔬 New Analysis", "nav_media": "🎥 Video/Audio Analysis",
+        "nav_library": "📚 My Library", "nav_macro": "📊 Macro Dashboard", "logout": "Log Out",
+        "role_label": "Role", "go_to": "Go to:", "nav_header": "Navigation", "research_tools": "🧰 Research Tools",
+        "tool_sample_size": "📊 Sample Size Calculator", "tool_research_assistant": "📝 Research Assistant (Coding)",
+        "dashboard_title": "General Career Alignment", "configuration": "Configuration",
+        "select_analysis_type": "Select Analysis Output Type:", "standard_report": "Comprehensive AI Report (Standard)",
+        "spss_data": "SPSS Statistical Data (Research)", "jd_title": "1. Industry Requirements (Job Description)",
+        "cv_title": "2. Your CV / Resume", "paste_text": "Paste text here:", "paste_cv": "Paste your CV here...",
+        "upload_file": "Upload File", "run_standard": "Run Standard Matching Algorithm", "run_spss": "Run & Export for SPSS",
+        "recent_analyses": "🕒 Your Recent Analyses", "welcome_title": "Welcome to SkillMatch AI",
+        "welcome_sub": "Bridging the gap between Engineering Education and Industry 4.0.", "tab_login": "Login",
+        "tab_signup": "Sign Up", "tab_reset": "Reset Password", "email": "Email", "password": "Password",
+        "login_btn": "Log In", "first_name": "First Name", "last_name": "Last Name", "select_country": "Select Country",
+        "confirm_password": "Confirm Password", "main_category": "Select your main category:", "specific_level": "Select your specific level:",
+        "create_account": "Create Account", "send_reset": "Send Reset Link", "personal_info": "Personal Information",
+        "account_security": "Account Security", "professional_role": "Professional Role",
+        "progress_title": "📈 Your Progress Over Time",
+        "cover_letter": "📄 Generate Tailored Cover Letter",
+        "interview_qs": "❓ Generate Interview Questions",
+        "feedback_title": "💬 Provide Detailed Feedback",
+        "feedback_placeholder": "What did you like? What could be improved?",
+        "submit_feedback": "Submit Feedback",
+        "Student": "Student", "Teacher / Professor": "Teacher / Professor", "Organization (HR)": "Organization (HR)",
+        "Industry Level": "Industry Level", "Institutional Level": "Institutional Level", "Recruitment Level": "Recruitment Level",
+        "Researcher": "Researcher", "General": "General", "Bachelor's Student (Instrumentation)": "Bachelor's Student (Instrumentation)",
+        "Master's Student": "Master's Student", "PhD Student": "PhD Student", "Lecturer": "Lecturer",
+        "Assistant Professor": "Assistant Professor", "Associate Professor": "Associate Professor", "Full Professor": "Full Professor",
+        "HR Recruiter": "HR Recruiter", "Talent Acquisition": "Talent Acquisition", "HR Manager": "HR Manager",
+        "R&D Scientist": "R&D Scientist", "Engineering Manager": "Engineering Manager", "Director of Innovation": "Director of Innovation",
+        "University Admin": "University Admin", "Program Director": "Program Director", "Policy Maker": "Policy Maker",
+        "Agency Recruiter": "Agency Recruiter", "Headhunter": "Headhunter", "Staffing Specialist": "Staffing Specialist",
+        "Postdoctoral Fellow": "Postdoctoral Fellow", "Principal Investigator": "Principal Investigator", "Research Scientist": "Research Scientist",
+    },
+    "🇨🇳 Chinese": {
+        "title": "SkillMatch AI (技能匹配)", "nav_analysis": "🔬 新分析", "nav_media": "🎥 视频/音频分析",
+        "nav_library": "📚 我的库", "nav_macro": "📊 宏观仪表板", "logout": "登出",
+        "role_label": "角色", "go_to": "前往：", "nav_header": "导航", "research_tools": "🧰 研究工具",
+        "tool_sample_size": "📊 样本量计算器", "tool_research_assistant": "📝 研究助理 (编码)",
+        "dashboard_title": "通用职业对齐", "configuration": "配置",
+        "select_analysis_type": "选择分析输出类型：", "standard_report": "综合 AI 报告 (标准)",
+        "spss_data": "SPSS 统计数据 (研究)", "jd_title": "1. 行业要求 (职位描述)",
+        "cv_title": "2. 您的简历", "paste_text": "在此粘贴文本：", "paste_cv": "在此粘贴您的简历...",
+        "upload_file": "上传文件", "run_standard": "运行标准匹配算法", "run_spss": "运行并导出至 SPSS",
+        "recent_analyses": "🕒 您的最近分析", "welcome_title": "欢迎来到 SkillMatch AI",
+        "welcome_sub": "弥合工程教育与工业 4.0 之间的差距。", "tab_login": "登录",
+        "tab_signup": "注册", "tab_reset": "重置密码", "email": "电子邮件", "password": "密码",
+        "login_btn": "登录", "first_name": "名字", "last_name": "姓氏", "select_country": "选择国家",
+        "confirm_password": "确认密码", "main_category": "选择您的主要类别：", "specific_level": "选择您的具体级别：",
+        "create_account": "创建账户", "send_reset": "发送重置链接", "personal_info": "个人信息",
+        "account_security": "账户安全", "professional_role": "专业角色",
+        "progress_title": "📈 您的进度跟踪",
+        "cover_letter": "📄 生成定制求职信",
+        "interview_qs": "❓ 生成面试问题",
+        "feedback_title": "💬 提供详细反馈",
+        "feedback_placeholder": "您喜欢什么？有什么可以改进的？",
+        "submit_feedback": "提交反馈",
+        "Student": "学生", "Teacher / Professor": "教师/教授", "Organization (HR)": "组织 (人力资源)",
+        "Industry Level": "行业级别", "Institutional Level": "机构级别", "Recruitment Level": "招聘级别",
+        "Researcher": "研究员", "General": "通用", "Bachelor's Student (Instrumentation)": "本科生 (仪器)",
+        "Master's Student": "硕士生", "PhD Student": "博士生", "Lecturer": "讲师",
+        "Assistant Professor": "助理教授", "Associate Professor": "副教授", "Full Professor": "正教授",
+        "HR Recruiter": "人力资源招聘人员", "Talent Acquisition": "人才招聘", "HR Manager": "人力资源经理",
+        "R&D Scientist": "研发科学家", "Engineering Manager": "工程经理", "Director of Innovation": "创新总监",
+        "University Admin": "大学管理员", "Program Director": "项目主任", "Policy Maker": "政策制定者",
+        "Agency Recruiter": "中介招聘人员", "Headhunter": "猎头", "Staffing Specialist": "人员配置专家",
+        "Postdoctoral Fellow": "博士后研究员", "Principal Investigator": "首席研究员", "Research Scientist": "研究科学家",
+    }
+}
+
+if "language" not in st.session_state:
+    st.session_state.language = "🇬🇧 English"
 
 # ==========================================
 # 1. INITIALIZE SUPABASE & SESSION
@@ -56,6 +145,13 @@ ROLES = {
     "Recruitment Level": ["Agency Recruiter", "Headhunter", "Staffing Specialist"],
     "Researcher": ["Postdoctoral Fellow", "Principal Investigator", "Research Scientist"]
 }
+
+@st.cache_data
+def get_country_list():
+    countries = [country.name for country in pycountry.countries]
+    if "Israel" in countries:
+        countries.remove("Israel")
+    return sorted(countries)
 
 # ==========================================
 # HELPER: T-SHAPED RADAR CHART
@@ -91,7 +187,6 @@ def run_graph_with_retry(graph_app, inputs, max_retries=3):
             time.sleep(3)
             st.warning(f"API hiccup detected. Retrying... (Attempt {attempt + 2}/{max_retries})")
 
-# NEW HELPER: Generate SPSS Syntax
 def generate_spss_syntax(score, matched_skills, missing_skills):
     prompt = ChatPromptTemplate.from_template(
         """You are an expert statistician. Write a valid IBM SPSS Syntax script (.sps) for a PhD researcher.
@@ -120,20 +215,22 @@ def generate_spss_syntax(score, matched_skills, missing_skills):
 # 2. LOGIN / SIGNUP / RESET SCREEN
 # ==========================================
 def show_auth_screen():
+    t = LANGUAGES[st.session_state.language]
+    
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         if os.path.exists(logo_path):
             st.image(logo_path, width="stretch")
             
-        st.title("Welcome to SkillMatch AI")
-        st.markdown("Bridging the gap between Engineering Education and Industry 4.0.")
+        st.title(t["welcome_title"])
+        st.markdown(t["welcome_sub"])
         
-        tab1, tab2, tab3 = st.tabs(["Login", "Sign Up", "Reset Password"])
+        tab1, tab2, tab3 = st.tabs([t["tab_login"], t["tab_signup"], t["tab_reset"]])
         
         with tab1:
-            email = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_pass")
-            if st.button("Log In", type="primary", use_container_width=True):
+            email = st.text_input(t["email"], key="login_email")
+            password = st.text_input(t["password"], type="password", key="login_pass")
+            if st.button(t["login_btn"], type="primary", use_container_width=True):
                 try:
                     response = supabase.auth.sign_in_with_password({"email": email, "password": password})
                     st.session_state.user = response.user
@@ -143,24 +240,59 @@ def show_auth_screen():
                     st.error(f"Login failed: {e}")
                     
         with tab2:
-            new_email = st.text_input("Email", key="signup_email")
-            new_password = st.text_input("Password", type="password", key="signup_pass")
-            main_role = st.selectbox("Select your main category:", list(ROLES.keys()), key="signup_main_role")
-            sub_role = st.selectbox("Select your specific level:", ROLES[main_role], key="signup_sub_role")
+            st.markdown(f"**{t['personal_info']}**")
+            col_first, col_last = st.columns(2)
+            with col_first:
+                first_name = st.text_input(t["first_name"], key="signup_first")
+            with col_last:
+                last_name = st.text_input(t["last_name"], key="signup_last")
             
-            if st.button("Create Account", use_container_width=True):
-                try:
-                    response = supabase.auth.sign_up({
-                        "email": new_email, "password": new_password,
-                        "options": {"data": {"main_role": main_role, "sub_role": sub_role}}
-                    })
-                    st.success(f"Account created as {sub_role}!")
-                except Exception as e:
-                    st.error(f"Signup failed: {e}")
+            new_email = st.text_input(t["email"], key="signup_email")
+            
+            country_list = get_country_list()
+            default_idx = country_list.index("Pakistan") if "Pakistan" in country_list else 0
+            selected_country = st.selectbox(t["select_country"], country_list, index=default_idx)
+            
+            st.markdown(f"**{t['account_security']}**")
+            new_password = st.text_input(t["password"], type="password", key="signup_pass")
+            confirm_password = st.text_input(t["confirm_password"], type="password", key="signup_pass_confirm")
+            
+            st.markdown(f"**{t['professional_role']}**")
+            translated_main_roles = [t.get(k, k) for k in ROLES.keys()]
+            selected_main_role_trans = st.selectbox(t["main_category"], translated_main_roles, key="signup_main_role")
+            main_role = list(ROLES.keys())[translated_main_roles.index(selected_main_role_trans)]
+            
+            translated_sub_roles = [t.get(sr, sr) for sr in ROLES[main_role]]
+            selected_sub_role_trans = st.selectbox(t["specific_level"], translated_sub_roles, key="signup_sub_role")
+            sub_role = ROLES[main_role][translated_sub_roles.index(selected_sub_role_trans)]
+            
+            if st.button(t["create_account"], use_container_width=True):
+                if not first_name or not last_name or not new_email or not new_password:
+                    st.error("Please fill in all required fields.")
+                elif new_password != confirm_password:
+                    st.error("Passwords do not match.")
+                elif len(new_password) < 6:
+                    st.error("Password must be at least 6 characters.")
+                else:
+                    try:
+                        response = supabase.auth.sign_up({
+                            "email": new_email, 
+                            "password": new_password,
+                            "options": {"data": {
+                                "first_name": first_name,
+                                "last_name": last_name,
+                                "country": selected_country,
+                                "main_role": main_role, 
+                                "sub_role": sub_role
+                            }}
+                        })
+                        st.success(f"Account created for {first_name} {last_name}! Please check your email to verify.")
+                    except Exception as e:
+                        st.error(f"Signup failed: {e}")
                     
         with tab3:
-            reset_email = st.text_input("Enter your email:", key="reset_email")
-            if st.button("Send Reset Link", use_container_width=True):
+            reset_email = st.text_input(t["email"], key="reset_email")
+            if st.button(t["send_reset"], use_container_width=True):
                 try:
                     supabase.auth.reset_password_for_email(reset_email)
                     st.success("Password reset link sent!")
@@ -174,84 +306,93 @@ def show_main_app():
     user_meta = st.session_state.user.user_metadata
     main_role = user_meta.get("main_role", "Student")
     sub_role = user_meta.get("sub_role", "General")
+    first_name = user_meta.get("first_name", "User")
+    last_name = user_meta.get("last_name", "")
+    full_name = f"{first_name} {last_name}".strip()
+    
+    t = LANGUAGES[st.session_state.language]
+    translated_main_role = t.get(main_role, main_role)
+    translated_sub_role = t.get(sub_role, sub_role)
 
     with st.sidebar:
         if os.path.exists(logo_path):
             st.image(logo_path, width="stretch")
             
-        st.header("Navigation")
-        st.write(f"👤 **{st.session_state.user.email}**")
-        st.info(f"Role: {sub_role} ({main_role})")
+        st.header(t["nav_header"])
+        st.page_link("pages/4_👤_My_Profile.py", label=f"👤 **{full_name}**")
+        st.info(f"{t['role_label']}: {translated_sub_role} ({translated_main_role})")
         
-        menu_options = ["🔬 New Analysis", "📚 My Library"]
+        menu_options = [t["nav_analysis"], t["nav_media"], t["nav_library"]]
         if main_role in ["Researcher", "Institutional Level"]:
-            menu_options.append("📊 Macro Dashboard")
+            menu_options.append(t["nav_macro"])
             
-        menu = st.radio("Go to:", menu_options)
+        menu = st.radio(t["go_to"], menu_options)
         
         st.divider()
-        if st.button("Log Out", type="primary", use_container_width=True):
+        st.header(t["research_tools"])
+        st.page_link("pages/1_📊_Sample_Size_Calculator.py", label=t["tool_sample_size"])
+        st.page_link("pages/3_📝_Research_Assistant.py", label=t["tool_research_assistant"])
+        
+        # ADMIN LINK
+        if st.session_state.user.email == "shahinashabir123@gmail.com": # REPLACE WITH YOUR EMAIL
+            st.page_link("pages/5_👑_Admin_Panel.py", label="👑 Admin Dashboard")
+        
+        st.divider()
+        if st.button(t["logout"], type="primary", use_container_width=True):
             supabase.auth.sign_out()
             st.session_state.user = None
             st.session_state.chat_messages = [] 
             st.rerun()
 
-    # --- MAIN AREA: NEW ANALYSIS ---
-    if menu == "🔬 New Analysis":
-        if main_role == "Teacher / Professor":
-            st.title("📚 Curriculum Audit Mode (Instrumentation)")
-            label_1 = "1. Industry Requirements (Target JD)"
-            label_2 = "2. Your Course Syllabus"
-            placeholder_2 = "Paste Course Syllabus here..."
-        elif main_role == "Student":
-            st.title(f"🎓 {sub_role} Career Alignment")
-            label_1 = "1. Industry Requirements (Job Description)"
-            label_2 = "2. Your CV / Resume"
-            placeholder_2 = "Paste your CV here..."
-        else:
-            st.title(f"📊 {sub_role} Dashboard")
-            label_1 = "1. Industry Requirements (Job Description)"
-            label_2 = "2. Candidate Profile / Syllabus"
-            placeholder_2 = "Paste Resume or Syllabus here..."
+    # --- MAIN AREA: NEW ANALYSIS (TEXT/PDF) ---
+    if menu == t["nav_analysis"]:
+        st.title(f"🎓 {translated_sub_role} {t['dashboard_title']}")
 
-        # --- NEW: ANALYSIS TYPE SELECTOR ---
-        st.markdown("### ⚙️ Configuration")
-        analysis_type = st.radio(
-            "Select Analysis Output Type:",
-            ["Comprehensive AI Report (Standard)", "SPSS Statistical Data (Research)"],
-            horizontal=True
-        )
+        st.markdown(f"### ⚙️ {t['configuration']}")
+        analysis_type = st.radio(t["select_analysis_type"], [t["standard_report"], t["spss_data"]], horizontal=True)
 
         st.divider()
-
-        st.subheader(label_1)
-        jd_tab1, jd_tab2 = st.tabs(["📝 Paste Text", "📄 Upload File"])
+        st.subheader(t["jd_title"])
+        jd_tab1, jd_tab2 = st.tabs([f"📝 {t['paste_text']}", f"📄 {t['upload_file']}"])
         with jd_tab1:
-            jd_text = st.text_area("Paste text here:", height=150)
+            jd_text = st.text_area(t["paste_text"], height=150)
         with jd_tab2:
-            jd_file = st.file_uploader("Upload (PDF/Image)", type=["pdf", "png", "jpg", "jpeg"])
+            jd_file = st.file_uploader(f"Upload (PDF/Image)", type=["pdf", "png", "jpg", "jpeg"])
 
         st.divider()
-        st.subheader(label_2)
+        st.subheader(t["cv_title"])
         
+        # --- ZIP UPLOAD FOR HR ---
         if main_role in ["Organization (HR)", "Recruitment Level"]:
-            cv_files = st.file_uploader("Upload Multiple Resumes (PDF/TXT)", type=["pdf", "txt"], accept_multiple_files=True)
+            upload_type = st.radio("Upload Type", ["Individual Files", "ZIP Archive"], horizontal=True)
+            cv_files = []
             cv_text = ""
+            
+            if upload_type == "ZIP Archive":
+                zip_file = st.file_uploader("Upload ZIP file containing multiple resumes", type=["zip"])
+                if zip_file:
+                    with zipfile.ZipFile(zip_file, 'r') as z:
+                        for filename in z.namelist():
+                            if filename.endswith(('.pdf', '.txt')):
+                                with z.open(filename) as f:
+                                    file_obj = io.BytesIO(f.read())
+                                    file_obj.name = filename
+                                    cv_files.append(file_obj)
+            else:
+                cv_files = st.file_uploader("Upload Multiple Resumes (PDF/TXT)", type=["pdf", "txt"], accept_multiple_files=True)
         else:
-            cv_tab1, cv_tab2 = st.tabs(["📝 Paste Text", "📄 Upload File"])
+            cv_tab1, cv_tab2 = st.tabs([f"📝 {t['paste_text']}", f"📄 {t['upload_file']}"])
             with cv_tab1:
-                cv_text = st.text_area(placeholder_2, height=150)
+                cv_text = st.text_area(t["paste_cv"], height=150)
             with cv_tab2:
-                cv_file = st.file_uploader("Upload (PDF/TXT)", type=["pdf", "txt"])
+                cv_file = st.file_uploader(f"Upload (PDF/TXT)", type=["pdf", "txt"])
             cv_files = [cv_file] if cv_file else []
 
-        # --- NEW: TWO BUTTONS ---
         col_btn1, col_btn2 = st.columns(2)
-        
         with col_btn1:
-            run_ai = st.button("Run Standard Matching Algorithm", type="primary", use_container_width=True)
+            run_ai = st.button(t["run_standard"], type="primary", use_container_width=True)
         with col_btn2:
-            run_spss = st.button("Run & Export for SPSS", type="secondary", use_container_width=True)
+            run_spss = st.button(t["run_spss"], type="secondary", use_container_width=True)
 
         if run_ai or run_spss:
             final_jd = ""
@@ -265,7 +406,6 @@ def show_main_app():
                     st.write("Extracting requirements...")
                     app = create_graph()
                     
-                    # Batch processing (HR) logic remains the same
                     if main_role in ["Organization (HR)", "Recruitment Level"] and cv_files:
                         leaderboard = []
                         progress_bar = st.progress(0)
@@ -293,9 +433,12 @@ def show_main_app():
                             except Exception as db_err:
                                 st.error(f"⚠️ Failed to save to database: {db_err}")
                             
+                            top_missing = result['gap_analysis']['missing'][0] if result['gap_analysis']['missing'] else "None"
+                            
                             leaderboard.append({
                                 "Candidate Name": cv_file.name,
                                 "Match Score (%)": result['matching_score'],
+                                "Top Missing Skill": top_missing,
                                 "Missing Skills Count": len(result['gap_analysis']['missing'])
                             })
                             progress_bar.progress((i + 1) / total_files)
@@ -308,7 +451,6 @@ def show_main_app():
                         st.dataframe(leaderboard, use_container_width=True)
                         st.rerun()
 
-                    # Single processing logic
                     else:
                         final_cv = cv_text
                         if cv_files and cv_files[0]: final_cv = extract_text_from_file(cv_files[0])
@@ -342,13 +484,8 @@ def show_main_app():
                         status.update(label="Analysis Complete!", state="complete", expanded=False)
                         st.divider()
                         
-                        # --- DISPLAY RESULTS ---
                         if run_spss:
-                            # SPSS SPECIFIC VIEW
                             st.subheader("📊 SPSS Statistical Data Export")
-                            st.info("Below is the raw data formatted for SPSS and the auto-generated Syntax file.")
-                            
-                            # Create DataFrame
                             spss_data = pd.DataFrame({
                                 "Candidate_ID": [str(st.session_state.user.id)[:8]],
                                 "Match_Score": [result['matching_score']],
@@ -357,39 +494,18 @@ def show_main_app():
                                 "Matched_Skills": [", ".join(result['gap_analysis']['matched'])],
                                 "Missing_Skills": [", ".join(result['gap_analysis']['missing'])]
                             })
-                            
                             st.dataframe(spss_data, use_container_width=True)
-                            
-                            # Export buttons
                             c1, c2 = st.columns(2)
                             with c1:
                                 csv = spss_data.to_csv(index=False).encode('utf-8')
-                                st.download_button(
-                                    label="📥 Download Data for SPSS (.csv)",
-                                    data=csv,
-                                    file_name="spss_data_export.csv",
-                                    mime="text/csv",
-                                    use_container_width=True
-                                )
+                                st.download_button("📥 Download Data for SPSS (.csv)", data=csv, file_name="spss_data_export.csv", mime="text/csv", use_container_width=True)
                             with c2:
-                                # Generate SPSS Syntax
                                 with st.spinner("Generating SPSS Syntax..."):
-                                    syntax = generate_spss_syntax(
-                                        result['matching_score'], 
-                                        result['gap_analysis']['matched'], 
-                                        result['gap_analysis']['missing']
-                                    )
-                                    st.download_button(
-                                        label="📥 Download SPSS Syntax (.sps)",
-                                        data=syntax,
-                                        file_name="analysis_syntax.sps",
-                                        mime="text/plain",
-                                        use_container_width=True
-                                    )
+                                    syntax = generate_spss_syntax(result['matching_score'], result['gap_analysis']['matched'], result['gap_analysis']['missing'])
+                                    st.download_button("📥 Download SPSS Syntax (.sps)", data=syntax, file_name="analysis_syntax.sps", mime="text/plain", use_container_width=True)
                             st.code(syntax, language="text")
                             
                         else:
-                            # STANDARD VIEW (UI + PDF)
                             col_score, col_chart = st.columns([1, 2])
                             with col_score:
                                 st.metric("Overall Matching Score", f"{result['matching_score']}%")
@@ -406,6 +522,23 @@ def show_main_app():
                                 st.subheader("⚠️ Missing Skills")
                                 for s in result['gap_analysis']['missing']: st.write(f"- {s}")
                             
+                            # --- COVER LETTER & INTERVIEW QUESTIONS ---
+                            st.divider()
+                            st.subheader("✨ AI Career Tools")
+                            col_tool1, col_tool2 = st.columns(2)
+                            
+                            with col_tool1:
+                                if st.button(t["cover_letter"], use_container_width=True):
+                                    with st.spinner("Drafting Cover Letter..."):
+                                        cl = generate_cover_letter_node(final_cv, final_jd, result['gap_analysis']['matched'])
+                                        st.text_area("Your Cover Letter", cl, height=300)
+                            
+                            with col_tool2:
+                                if st.button(t["interview_qs"], use_container_width=True):
+                                    with st.spinner("Generating Interview Questions..."):
+                                        qs = generate_interview_questions_node(final_cv, final_jd, result['gap_analysis']['missing'])
+                                        st.text_area("Interview Prep", qs, height=300)
+
                             st.divider()
                             st.subheader("📊 AI Career & Market Strategy")
                             report_text = result["evidence"][0]
@@ -415,27 +548,22 @@ def show_main_app():
                             missing_str = ", ".join(result['gap_analysis']['missing'])
                             
                             try:
-                                pdf_bytes = generate_pdf_report(
-                                    report_text=report_text, score=result['matching_score'],
-                                    matched_skills=matched_str, missing_skills=missing_str
-                                )
-                                st.download_button(
-                                    label="📥 Download Full Report (PDF)", data=pdf_bytes,
-                                    file_name="Instrumentation_Analysis.pdf", mime="application/pdf", use_container_width=True
-                                )
+                                pdf_bytes = generate_pdf_report(report_text=report_text, score=result['matching_score'], matched_skills=matched_str, missing_skills=missing_str)
+                                st.download_button("📥 Download Full Report (PDF)", data=pdf_bytes, file_name="Instrumentation_Analysis.pdf", mime="application/pdf", use_container_width=True)
                             except Exception as e:
                                 st.error(f"Could not generate PDF: {e}")
                             
+                            # --- DETAILED FEEDBACK ---
                             st.divider()
-                            st.write("**Was this AI report accurate?**")
-                            feedback = st.feedback("thumbs")
-                            if feedback is not None and inserted_id:
-                                try:
-                                    rating_value = 1 if feedback == 1 else 0
-                                    db_utils.update_feedback(supabase, inserted_id, rating_value)
-                                    st.toast("Feedback saved!")
-                                except Exception as e:
-                                    st.error(f"Failed to save feedback: {e}")
+                            st.subheader(t["feedback_title"])
+                            feedback_text = st.text_area(t["feedback_placeholder"])
+                            if st.button(t["submit_feedback"]):
+                                if inserted_id:
+                                    try:
+                                        supabase.table("analysis_history").update({"feedback_text": feedback_text}).eq("id", inserted_id).execute()
+                                        st.toast("✅ Feedback submitted successfully! Thank you.")
+                                    except Exception as e:
+                                        st.error(f"Could not submit feedback: {e}")
 
         # DASHBOARD CHATBOT
         st.write("") 
@@ -475,9 +603,81 @@ def show_main_app():
                         except Exception as e:
                             st.error(f"Error communicating with AI: {e}")
 
+    # --- MAIN AREA: VIDEO/AUDIO ANALYSIS ---
+    elif menu == t["nav_media"]:
+        st.title("🎥 Interview & Presentation Analysis")
+        st.markdown("Upload a short video or audio recording of yourself presenting a project or answering a technical question. The AI will analyze your communication clarity, technical explanation, and confidence.")
+
+        uploaded_media = st.file_uploader("Upload Video (MP4) or Audio (MP3/WAV)", type=["mp4", "mov", "mp3", "wav", "m4a"])
+
+        if uploaded_media is not None:
+            st.video(uploaded_media) if uploaded_media.type.startswith("video/") else st.audio(uploaded_media)
+
+            if st.button("Analyze Communication Skills", type="primary", use_container_width=True):
+                with st.status("Processing Media...", expanded=True) as status:
+                    st.write("Extracting audio and transcribing speech...")
+                    
+                    transcript = transcribe_media(uploaded_media)
+                    
+                    if transcript.startswith("Error"):
+                        st.error(transcript)
+                        status.update(label="Transcription Failed", state="error")
+                    else:
+                        st.write("Transcript generated. Running AI analysis...")
+                        
+                        analysis_report = analyze_media_transcript(transcript)
+                        
+                        status.update(label="Analysis Complete!", state="complete", expanded=False)
+                        
+                        st.divider()
+                        st.subheader("📝 Transcription")
+                        with st.expander("View Raw Transcript"):
+                            st.write(transcript)
+                            
+                        st.subheader("📊 Communication Analysis")
+                        st.markdown(analysis_report)
+                        
+                        try:
+                            db_utils.save_analysis_record(
+                                supabase_client=supabase, user_id=st.session_state.user.id, 
+                                jd_text="Video/Audio Interview Analysis", cv_text=transcript[:500], score=100.0, 
+                                matched_skills=["Communication"], missing_skills=["N/A"], 
+                                report_text=analysis_report
+                            )
+                            st.toast("✅ Media Analysis saved to your Library!")
+                        except Exception as db_err:
+                            st.error(f"⚠️ Failed to save to database: {db_err}")
+
     # --- MAIN AREA: MY LIBRARY ---
-    elif menu == "📚 My Library":
+    elif menu == t["nav_library"]:
         st.title("📚 My Saved Analyses")
+        
+        # --- NEW: PROGRESS CHART ---
+        st.subheader(t["progress_title"])
+        try:
+            # Fetch data for chart
+            chart_response = supabase.table("analysis_history")\
+                .select("created_at, match_score")\
+                .eq("user_id", str(st.session_state.user.id))\
+                .order("created_at").execute()
+                
+            chart_data = chart_response.data
+            if chart_data and len(chart_data) > 1:
+                df_chart = pd.DataFrame(chart_data)
+                df_chart['created_at'] = pd.to_datetime(df_chart['created_at']).dt.date
+                fig_line = px.line(df_chart, x='created_at', y='match_score', markers=True, 
+                                   labels={'created_at': 'Date', 'match_score': 'Match Score (%)'},
+                                   title="Skill Match Score Trend")
+                fig_line.update_layout(yaxis_range=[0,100])
+                st.plotly_chart(fig_line, use_container_width=True)
+            elif chart_data and len(chart_data) == 1:
+                st.info("Run at least 2 analyses to see your progress chart.")
+            else:
+                st.info("No data for progress chart yet.")
+        except Exception as e:
+            st.warning(f"Could not load progress chart: {e}")
+
+        st.divider()
         
         col_title, col_clear = st.columns([3, 1])
         with col_title:
@@ -612,7 +812,7 @@ def show_main_app():
             st.error(f"Could not load library: {e}")
 
     # --- MAIN AREA: MACRO DASHBOARD ---
-    elif menu == "📊 Macro Dashboard":
+    elif menu == t["nav_macro"]:
         st.title("📊 Macro-Level Skill Gap Analysis")
         st.markdown("Aggregated data across all users. Perfect for institutional reporting.")
         
@@ -645,8 +845,19 @@ def show_main_app():
             st.error(f"Error: {e}")
 
 # ==========================================
-# 4. ROUTER
+# 4. ROUTER (GLOBAL LAYOUT WITH LANGUAGE SELECTOR)
 # ==========================================
+# Place the language selector at the very top of the page, before anything else
+col_spacer, col_lang = st.columns([8, 2])
+with col_lang:
+    st.session_state.language = st.selectbox(
+        "🌐 Language", 
+        list(LANGUAGES.keys()), 
+        index=list(LANGUAGES.keys()).index(st.session_state.language),
+        label_visibility="collapsed"
+    )
+
+# Now check auth and route
 if st.session_state.user is None:
     show_auth_screen()
 else:

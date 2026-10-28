@@ -13,3 +13,5 @@ plotly
 fpdf2
 matplotlib
 openpyxl
+moviepy
+pycountry

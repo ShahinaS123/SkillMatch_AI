@@ -1,4 +1,4 @@
-from typing import TypedDict, List
+from typing import TypedDict, List, Dict
 
 class SkillMatchingState(TypedDict):
     job_description: str
@@ -7,4 +7,5 @@ class SkillMatchingState(TypedDict):
     extracted_candidate_skills: List[str]
     matching_score: float
     gap_analysis: dict
-    evidence: List[str]
+    score_breakdown: Dict[str, float]  # NEW: For Technical/Experience/Education breakdown
+    evidence: List[str] 
