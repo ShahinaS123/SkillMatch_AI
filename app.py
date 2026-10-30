@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import time
+import re
+from groq import RateLimitError
 import zipfile
 import io
 import pandas as pd
@@ -181,6 +183,17 @@ def run_graph_with_retry(graph_app, inputs, max_retries=3):
     for attempt in range(max_retries):
         try:
             return graph_app.invoke(inputs)
+        except RateLimitError as e:
+            # Groq requires you to wait for the rate limit window to reset
+            wait_time = 60  # Default to 60 seconds for TPM reset
+            error_str = str(e)
+            if "try again in" in error_str:
+                match = re.search(r'try again in ([\d\.]+)s', error_str)
+                if match:
+                    wait_time = float(match.group(1)) + 2
+            
+            st.warning(f"Groq rate limit hit. Waiting {wait_time:.0f}s before retry {attempt+2}/{max_retries}...")
+            time.sleep(wait_time)
         except Exception as e:
             if attempt == max_retries - 1:
                 raise e
