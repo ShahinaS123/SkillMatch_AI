@@ -30,9 +30,9 @@ api_key = get_api_key()
 llm = ChatGroq(
     model="openai/gpt-oss-120b", 
     temperature=0,
-    api_key=api_key 
+    api_key=api_key,
+    max_tokens=1500
 )
-
 # ==========================================
 # 2. STATE SCHEMAS
 # ==========================================
