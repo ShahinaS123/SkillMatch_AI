@@ -1,5 +1,6 @@
 import os
 import re
+import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
@@ -7,14 +8,33 @@ from pydantic import BaseModel, Field
 from state import SkillMatchingState
 from typing import List
 
-# Load environment variables
+# 1. Load local .env file (for local testing)
 load_dotenv()
 
-# Initialize the LLM
-llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0)
+# 2. Get API Key (Checks local env first, then Streamlit Secrets)
+def get_api_key():
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        try:
+            # Check Streamlit Cloud Secrets
+            api_key = st.secrets["GROQ_API_KEY"]
+        except Exception:
+            pass
+            
+    if not api_key:
+        raise ValueError("GROQ_API_KEY missing. Check .env file or Streamlit Secrets.")
+    return api_key
+
+# 3. Initialize LLM with the key
+api_key = get_api_key()
+llm = ChatGroq(
+    model="openai/gpt-oss-120b", 
+    temperature=0,
+    api_key=api_key 
+)
 
 # ==========================================
-# 1. STATE SCHEMAS
+# 2. STATE SCHEMAS
 # ==========================================
 class SkillList(BaseModel):
     skills: list[str] = Field(description="A list of professional skills extracted from the text")
@@ -24,13 +44,13 @@ class MatchResult(BaseModel):
     missing_skills: List[str] = Field(description="Skills from the JD that are completely missing from the CV.")
     match_score: float = Field(description="A score from 0 to 100.")
     
-    # NEW: Breakdown for professional dashboard
+    # Breakdown for professional dashboard
     technical_score: float = Field(description="Score for technical/hard skills match (0-100).")
     experience_score: float = Field(description="Score for experience level match (0-100).")
     education_score: float = Field(description="Score for education match (0-100).")
 
 # ==========================================
-# 2. CORE GRAPH NODES
+# 3. CORE GRAPH NODES
 # ==========================================
 def jd_analyzer_node(state: SkillMatchingState):
     prompt = ChatPromptTemplate.from_template(
@@ -73,7 +93,6 @@ def matching_engine_node(state: SkillMatchingState):
     
     state["matching_score"] = round(result.match_score, 2)
     
-    # Store the breakdown scores
     state["score_breakdown"] = {
         "technical": round(result.technical_score, 2),
         "experience": round(result.experience_score, 2),
@@ -84,10 +103,9 @@ def matching_engine_node(state: SkillMatchingState):
     return state
 
 # ==========================================
-# 3. AI UTILITIES & REPORTING
+# 4. AI UTILITIES & REPORTING
 # ==========================================
 def clean_ai_output(text):
-    """Removes any stray HTML tags the AI might hallucinate."""
     if not text: return ""
     text = re.sub(r'<[^>]+>', ', ', text)
     text = re.sub(r',\s*,', ',', text)
@@ -137,10 +155,9 @@ def market_strategy_node(state: SkillMatchingState):
     return state
 
 # ==========================================
-# 4. MEDIA & MULTIMODAL ANALYSIS
+# 5. MEDIA & MULTIMODAL ANALYSIS
 # ==========================================
 def analyze_media_transcript(transcript):
-    """Analyzes an interview/presentation transcript for communication skills."""
     prompt = ChatPromptTemplate.from_template(
         """You are an expert Communication Coach and Technical Interviewer for Engineering graduates.
         Analyze the following transcript of a candidate's spoken presentation or interview.
@@ -164,10 +181,9 @@ def analyze_media_transcript(transcript):
     return result.content
 
 # ==========================================
-# 5. ADVANCED CAREER TOOLS (NEW)
+# 6. ADVANCED CAREER TOOLS
 # ==========================================
 def generate_cover_letter_node(cv_text, jd_text, matched_skills):
-    """Generates a tailored cover letter based on the CV and JD."""
     prompt = ChatPromptTemplate.from_template(
         """You are an expert career coach. Write a professional, 3-paragraph cover letter for a candidate applying to this job.
         
@@ -180,14 +196,13 @@ def generate_cover_letter_node(cv_text, jd_text, matched_skills):
     )
     chain = prompt | llm
     result = chain.invoke({
-        "jd": jd_text[:3000], # Limit length to save tokens
+        "jd": jd_text[:3000], 
         "cv": cv_text[:3000],
         "skills": ", ".join(matched_skills)
     })
     return result.content
 
 def generate_interview_questions_node(cv_text, jd_text, missing_skills):
-    """Generates technical interview questions based on missing skills."""
     prompt = ChatPromptTemplate.from_template(
         """You are a Senior Technical Interviewer for an Engineering position. 
         Based on the candidate's profile and the missing skills, generate 5 challenging technical interview questions.
@@ -206,7 +221,6 @@ def generate_interview_questions_node(cv_text, jd_text, missing_skills):
     return result.content
 
 def simulate_what_if_node(current_missing, proposed_course):
-    """Simulates the impact of adding a new course to the curriculum."""
     prompt = ChatPromptTemplate.from_template(
         """You are an Academic Curriculum Auditor. 
         Currently, the students are missing these skills: {missing}.
@@ -224,4 +238,36 @@ def simulate_what_if_node(current_missing, proposed_course):
         "missing": ", ".join(current_missing),
         "course": proposed_course
     })
+    return result.content
+# ... [Keep existing code] ...
+
+def anonymize_cv_node(cv_text):
+    """Strips PII (names, photos, gender, age) from a CV."""
+    prompt = ChatPromptTemplate.from_template(
+        """Rewrite the following CV text to completely remove all personal identifiers.
+        Remove the candidate's name, email, phone number, physical address, date of birth, gender, and nationality.
+        Replace the name with "Candidate". Keep all technical skills, education, and experience intact.
+        
+        Original CV:
+        {cv}
+        """
+    )
+    chain = prompt | llm
+    result = chain.invoke({"cv": cv_text})
+    return result.content
+
+def tailor_cv_node(cv_text, jd_text, missing_skills):
+    """Rewrites CV bullets to highlight matched skills and bridge gaps."""
+    prompt = ChatPromptTemplate.from_template(
+        """You are an expert resume writer. Rewrite the candidate's professional summary and 3 bullet points to better align with the Job Description.
+        Address the following missing skills by showing how the candidate's past experience demonstrates transferable abilities: {missing}.
+        
+        Job Description: {jd}
+        Original CV: {cv}
+        
+        Provide the output in Markdown format.
+        """
+    )
+    chain = prompt | llm
+    result = chain.invoke({"cv": cv_text[:2000], "jd": jd_text[:2000], "missing": ", ".join(missing_skills)})
     return result.content
