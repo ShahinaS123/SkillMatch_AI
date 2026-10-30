@@ -179,26 +179,33 @@ def create_radar_chart(matched_count, missing_count):
     )
     return fig
 
+import time
+
 def run_graph_with_retry(graph_app, inputs, max_retries=3):
     for attempt in range(max_retries):
         try:
             return graph_app.invoke(inputs)
-        except RateLimitError as e:
-            # Groq requires you to wait for the rate limit window to reset
-            wait_time = 60  # Default to 60 seconds for TPM reset
-            error_str = str(e)
-            if "try again in" in error_str:
-                match = re.search(r'try again in ([\d\.]+)s', error_str)
-                if match:
-                    wait_time = float(match.group(1)) + 2
-            
-            st.warning(f"Groq rate limit hit. Waiting {wait_time:.0f}s before retry {attempt+2}/{max_retries}...")
-            time.sleep(wait_time)
         except Exception as e:
+            error_str = str(e).lower()
+            is_rate_limit = "429" in error_str or "rate_limit" in error_str or "rate limit" in error_str
+            
             if attempt == max_retries - 1:
                 raise e
-            time.sleep(3)
-            st.warning(f"API hiccup detected. Retrying... (Attempt {attempt + 2}/{max_retries})")
+                
+            if is_rate_limit:
+                # Try to extract the exact wait time from Groq's message
+                wait_time = 60  # Default for per-minute limit
+                if "try again in" in error_str:
+                    import re
+                    match = re.search(r'try again in ([\d\.]+)s', error_str)
+                    if match:
+                        wait_time = float(match.group(1)) + 2
+                
+                st.warning(f"Rate limit reached. Waiting {wait_time:.0f}s... (Attempt {attempt + 2}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                st.warning(f"API hiccup detected. Retrying... (Attempt {attempt + 2}/{max_retries})")
+                time.sleep(3)
 
 def generate_spss_syntax(score, matched_skills, missing_skills):
     prompt = ChatPromptTemplate.from_template(
