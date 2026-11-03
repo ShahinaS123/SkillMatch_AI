@@ -119,13 +119,29 @@ if "language" not in st.session_state:
 # ==========================================
 # 1. INITIALIZE SUPABASE & SESSION
 # ==========================================
+def get_setting(name, default=None):
+    """Read configuration from environment variables or Streamlit Secrets."""
+    value = os.getenv(name)
+    if value:
+        return value
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+
 @st.cache_resource
 def init_supabase() -> Client:
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
+    url = get_setting("SUPABASE_URL")
+    key = get_setting("SUPABASE_KEY")
     return create_client(url, key)
 
-supabase = init_supabase()
+
+try:
+    supabase = init_supabase()
+except Exception as exc:
+    st.error(f"Database configuration error: {exc}")
+    st.stop()
 
 if "user" not in st.session_state:
     st.session_state.user = None
@@ -135,8 +151,14 @@ if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 if "latest_analysis_context" not in st.session_state:
     st.session_state.latest_analysis_context = "No recent analysis available."
+if "latest_leaderboard" not in st.session_state:
+    st.session_state.latest_leaderboard = []
 
-chat_llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.7)
+def get_chat_llm():
+    api_key = get_setting("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured in Streamlit Secrets or .env.")
+    return ChatGroq(model="openai/gpt-oss-120b", temperature=0.2, api_key=api_key)
 
 ROLES = {
     "Student": ["Bachelor's Student (Instrumentation)", "Master's Student", "PhD Student"],
@@ -158,28 +180,67 @@ def get_country_list():
 # ==========================================
 # HELPER: T-SHAPED RADAR CHART
 # ==========================================
-def create_radar_chart(matched_count, missing_count):
-    total = matched_count + missing_count if (matched_count + missing_count) > 0 else 1
-    score_pct = (matched_count / total) * 100
-    categories = ['Hardware (Circuits)', 'Software (Coding)', 'Theory (Physics/Math)', 'Instrumentation (Sensors)']
-    
+def create_skill_summary_chart(matched_count, missing_count):
+    """Show observed matched/missing counts without inventing category scores."""
     fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(
-        r=[score_pct, score_pct-10, score_pct+5, score_pct], 
-        theta=categories, fill='toself', name='Candidate Profile',
-        line_color='#0066cc', fillcolor='rgba(0, 102, 204, 0.3)'
-    ))
-    fig.add_trace(go.Scatterpolar(
-        r=[100, 100, 100, 100], theta=categories, fill='toself', 
-        name='Industry Requirement', line_color='#dc3545', fillcolor='rgba(220, 53, 69, 0.1)'
+    fig.add_trace(go.Bar(
+        x=["Matched skills", "Missing skills"],
+        y=[matched_count, missing_count],
+        text=[matched_count, missing_count],
+        textposition="auto",
+        marker_color=["#16a34a", "#dc3545"],
+        showlegend=False,
     ))
     fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-        showlegend=True, margin=dict(t=30, b=30, l=30, r=30), height=300
+        yaxis_title="Number of skills",
+        yaxis=dict(rangemode="tozero", dtick=1),
+        margin=dict(t=20, b=30, l=30, r=20),
+        height=280,
     )
     return fig
 
+
+def create_radar_chart(matched_count, missing_count):
+    # Compatibility wrapper; this is a count chart, not a radar chart.
+    return create_skill_summary_chart(matched_count, missing_count)
+
 import time
+
+def validate_analysis_result(result):
+    """Check graph output before it is shown or saved."""
+    if not isinstance(result, dict):
+        raise ValueError("The matching workflow returned an invalid result.")
+    if "matching_score" not in result or "gap_analysis" not in result:
+        raise ValueError("The matching workflow must return matching_score and gap_analysis.")
+    gap = result.get("gap_analysis") or {}
+    if not isinstance(gap, dict):
+        raise ValueError("gap_analysis must be a dictionary.")
+    matched = gap.get("matched") or []
+    missing = gap.get("missing") or []
+    if not isinstance(matched, list) or not isinstance(missing, list):
+        raise ValueError("Matched and missing skills must be lists.")
+    try:
+        score = float(result["matching_score"])
+    except (TypeError, ValueError):
+        raise ValueError("The matching workflow returned a non-numeric score.")
+    if not 0 <= score <= 100:
+        raise ValueError("The matching score must be between 0 and 100.")
+    evidence = result.get("evidence") or []
+    if isinstance(evidence, str):
+        evidence = [evidence]
+    elif not isinstance(evidence, list):
+        evidence = [str(evidence)]
+    return {
+        **result,
+        "matching_score": score,
+        "gap_analysis": {"matched": matched, "missing": missing},
+        "evidence": evidence or ["No written report was returned by the analysis workflow."],
+    }
+
+
+
+import time
+import re
 
 def run_graph_with_retry(graph_app, inputs, max_retries=3):
     for attempt in range(max_retries):
@@ -188,48 +249,49 @@ def run_graph_with_retry(graph_app, inputs, max_retries=3):
         except Exception as e:
             error_str = str(e).lower()
             is_rate_limit = "429" in error_str or "rate_limit" in error_str or "rate limit" in error_str
-            
+            is_too_large = "413" in error_str or "request too large" in error_str
+
             if attempt == max_retries - 1:
                 raise e
-                
+
+            if is_too_large:
+                st.error("The request is too large for the free tier. Please shorten your CV or Job Description.")
+                raise e # Do not retry, it will always fail
+            
             if is_rate_limit:
-                # Try to extract the exact wait time from Groq's message
-                wait_time = 60  # Default for per-minute limit
-                if "try again in" in error_str:
-                    import re
-                    match = re.search(r'try again in ([\d\.]+)s', error_str)
-                    if match:
-                        wait_time = float(match.group(1)) + 2
+                # Default wait, but try to extract Groq's exact suggestion
+                wait_time = 60
+                match = re.search(r'try again in ([\d\.]+)s', error_str)
+                if match:
+                    wait_time = float(match.group(1)) + 2
                 
-                st.warning(f"Rate limit reached. Waiting {wait_time:.0f}s... (Attempt {attempt + 2}/{max_retries})")
+                st.warning(f"Rate limit reached. Waiting {wait_time:.0f}s before retry {attempt + 2}/{max_retries}...")
                 time.sleep(wait_time)
             else:
                 st.warning(f"API hiccup detected. Retrying... (Attempt {attempt + 2}/{max_retries})")
                 time.sleep(3)
 
 def generate_spss_syntax(score, matched_skills, missing_skills):
-    prompt = ChatPromptTemplate.from_template(
-        """You are an expert statistician. Write a valid IBM SPSS Syntax script (.sps) for a PhD researcher.
-        The researcher has the following data for a single candidate:
-        - Match Score (Scale): {score}
-        - Matched Skills Count (Scale): {matched_count}
-        - Missing Skills Count (Scale): {missing_count}
+    """Create descriptive SPSS syntax for one case; no invalid single-case correlation."""
+    score_value = float(score)
+    matched_count = len(matched_skills)
+    missing_count = len(missing_skills)
+    return f"""* SkillMatch AI single-candidate descriptive export.
+* Correlation is omitted because one observation cannot support it.
+DATA LIST FREE /
+  Match_Score Matched_Count Missing_Count.
+BEGIN DATA
+{score_value:.4f} {matched_count} {missing_count}
+END DATA.
+VARIABLE LABELS
+  Match_Score 'SkillMatch AI score returned by the model'
+  Matched_Count 'Number of matched skills'
+  Missing_Count 'Number of missing skills'.
+FORMATS Match_Score (F8.2).
+DESCRIPTIVES VARIABLES=Match_Score Matched_Count Missing_Count
+  /STATISTICS=MEAN STDDEV MIN MAX.
+"""
 
-        Write SPSS syntax to:
-        1. Create a dataset with these variables.
-        2. Run a Descriptive Statistics command (FREQUENCIES or DESCRIPTIVES).
-        3. Run a Correlation command between Match Score and Missing Skills Count.
-        
-        Only output the raw SPSS syntax. Do not output any markdown formatting or explanations.
-        """
-    )
-    chain = prompt | chat_llm
-    result = chain.invoke({
-        "score": score,
-        "matched_count": len(matched_skills),
-        "missing_count": len(missing_skills)
-    })
-    return result.content
 
 # ==========================================
 # 2. LOGIN / SIGNUP / RESET SCREEN
@@ -393,7 +455,7 @@ def show_main_app():
                 if zip_file:
                     with zipfile.ZipFile(zip_file, 'r') as z:
                         for filename in z.namelist():
-                            if filename.endswith(('.pdf', '.txt')):
+                            if not filename.endswith('/') and filename.lower().endswith(('.pdf', '.txt')):
                                 with z.open(filename) as f:
                                     file_obj = io.BytesIO(f.read())
                                     file_obj.name = filename
@@ -441,7 +503,7 @@ def show_main_app():
                                 "matching_score": 0.0, "gap_analysis": {}, "evidence": []
                             }
                             
-                            result = run_graph_with_retry(app, input_data)
+                            result = validate_analysis_result(run_graph_with_retry(app, input_data))
                             
                             try:
                                 db_utils.save_analysis_record(
@@ -468,8 +530,16 @@ def show_main_app():
                         st.divider()
                         st.subheader("🏆 Candidate Leaderboard")
                         leaderboard = sorted(leaderboard, key=lambda x: x["Match Score (%)"], reverse=True)
-                        st.dataframe(leaderboard, use_container_width=True)
-                        st.rerun()
+                        st.session_state.latest_leaderboard = leaderboard
+                        leaderboard_df = pd.DataFrame(leaderboard)
+                        st.dataframe(leaderboard_df, use_container_width=True, hide_index=True)
+                        st.download_button(
+                            "📥 Download leaderboard (CSV)",
+                            data=leaderboard_df.to_csv(index=False).encode("utf-8"),
+                            file_name="skillmatch_candidate_leaderboard.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
 
                     else:
                         final_cv = cv_text
@@ -481,7 +551,7 @@ def show_main_app():
                             "matching_score": 0.0, "gap_analysis": {}, "evidence": []
                         }
                         
-                        result = run_graph_with_retry(app, input_data)
+                        result = validate_analysis_result(run_graph_with_retry(app, input_data))
                         
                         st.session_state.latest_analysis_context = f"""
                         Match Score: {result['matching_score']}%
@@ -506,6 +576,11 @@ def show_main_app():
                         
                         if run_spss:
                             st.subheader("📊 SPSS Statistical Data Export")
+                            st.info(
+                                "This export contains one candidate record and descriptive syntax only. "
+                                "Do not run correlations or inferential tests on a single case; use a "
+                                "multi-candidate dataset for those analyses."
+                            )
                             spss_data = pd.DataFrame({
                                 "Candidate_ID": [str(st.session_state.user.id)[:8]],
                                 "Match_Score": [result['matching_score']],
@@ -529,7 +604,10 @@ def show_main_app():
                             col_score, col_chart = st.columns([1, 2])
                             with col_score:
                                 st.metric("Overall Matching Score", f"{result['matching_score']}%")
-                                st.info("T-Shaped Skill Balance")
+                                st.caption(
+                                    "This score is returned by the matching workflow. Treat it as a "
+                                    "model-generated estimate until validated against expert-labelled data."
+                                )
                             with col_chart:
                                 radar_fig = create_radar_chart(len(result['gap_analysis']['matched']), len(result['gap_analysis']['missing']))
                                 st.plotly_chart(radar_fig, use_container_width=True, key="radar_chart", config={'displayModeBar': False})
@@ -615,8 +693,8 @@ def show_main_app():
                                 ("human", prompt)
                             ])
                             
-                            chain = chat_prompt | chat_llm
-                            response = chain.invoke({"prompt": prompt})
+                            chain = chat_prompt | get_chat_llm()
+                            response = chain.invoke({})
                             
                             st.markdown(response.content)
                             st.session_state.chat_messages.append({"role": "assistant", "content": response.content})
@@ -657,16 +735,10 @@ def show_main_app():
                         st.subheader("📊 Communication Analysis")
                         st.markdown(analysis_report)
                         
-                        try:
-                            db_utils.save_analysis_record(
-                                supabase_client=supabase, user_id=st.session_state.user.id, 
-                                jd_text="Video/Audio Interview Analysis", cv_text=transcript[:500], score=100.0, 
-                                matched_skills=["Communication"], missing_skills=["N/A"], 
-                                report_text=analysis_report
-                            )
-                            st.toast("✅ Media Analysis saved to your Library!")
-                        except Exception as db_err:
-                            st.error(f"⚠️ Failed to save to database: {db_err}")
+                        st.info(
+                            "This communication assessment is kept separate from resume-to-job "
+                            "matching scores so it does not distort your matching history."
+                        )
 
     # --- MAIN AREA: MY LIBRARY ---
     elif menu == t["nav_library"]:
@@ -703,14 +775,23 @@ def show_main_app():
         with col_title:
             st.markdown("Review your historical reports and track your skill growth.")
         with col_clear:
-            if st.button("🗑️ Clear Entire History", type="secondary", use_container_width=True):
+            confirm_clear = st.checkbox(
+                "I understand this permanently deletes all my saved analyses.",
+                key="confirm_clear_history",
+            )
+            if st.button(
+                "🗑️ Clear Entire History",
+                type="secondary",
+                use_container_width=True,
+                disabled=not confirm_clear,
+            ):
                 try:
-                    res = supabase.table("analysis_history").delete().eq("user_id", str(st.session_state.user.id)).execute()
-                    if len(res.data) > 0:
-                        st.success(f"Deleted {len(res.data)} records successfully!")
-                        st.rerun()
-                    else:
-                        st.warning("No records deleted. Check Supabase RLS delete policy.")
+                    res = supabase.table("analysis_history").delete().eq(
+                        "user_id", str(st.session_state.user.id)
+                    ).execute()
+                    st.success(f"Deleted {len(res.data or [])} records.")
+                    st.session_state.page = 1
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Could not clear history: {e}")
 
@@ -721,7 +802,7 @@ def show_main_app():
             offset = (st.session_state.page - 1) * items_per_page
             
             response = supabase.table("analysis_history")\
-                .select("*").order("created_at", desc=True).range(offset, offset + items_per_page - 1).execute()
+                .select("*").eq("user_id", str(st.session_state.user.id)).order("created_at", desc=True).range(offset, offset + items_per_page - 1).execute()
             
             history = response.data
             
@@ -733,8 +814,10 @@ def show_main_app():
                     
                     with st.expander(f"📊 Score: {item['match_score']}% | Date: {item['created_at'][:10]} {rating_icon}"):
                         
-                        matched_list = [s.strip() for s in item['matched_skills'].split(",")] if item['matched_skills'] else []
-                        missing_list = [s.strip() for s in item['missing_skills'].split(",")] if item['missing_skills'] else []
+                        matched_raw = item.get("matched_skills") or ""
+                        missing_raw = item.get("missing_skills") or ""
+                        matched_list = matched_raw if isinstance(matched_raw, list) else [x.strip() for x in str(matched_raw).split(",") if x.strip()]
+                        missing_list = missing_raw if isinstance(missing_raw, list) else [x.strip() for x in str(missing_raw).split(",") if x.strip()]
                         
                         col1, col2 = st.columns([1, 2])
                         with col1:
